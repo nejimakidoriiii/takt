@@ -213,23 +213,23 @@ describe('PR resolution in routing', () => {
       mockExit.mockRestore();
     });
 
-    it('should exit with error when PR has no review comments', async () => {
+    it('should pass to interactive mode even when PR has no review comments', async () => {
       // Given
       mockOpts.pr = 456;
       const emptyPrReview = createMockPrReview({ reviews: [], comments: [] });
       mockCheckCliStatus.mockReturnValue({ available: true });
       mockFetchPrReviewComments.mockReturnValue(emptyPrReview);
 
-      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit called');
-      });
+      // When
+      await executeDefaultAction();
 
-      // When/Then
-      await expect(executeDefaultAction()).rejects.toThrow('process.exit called');
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockInteractiveMode).not.toHaveBeenCalled();
-
-      mockExit.mockRestore();
+      // Then: PR title/description/files are still passed to interactive mode
+      expect(mockInteractiveMode).toHaveBeenCalledWith(
+        '/test/cwd',
+        expect.stringContaining('## PR #456 Review Comments:'),
+        expect.anything(),
+        undefined,
+      );
     });
 
     it('should not resolve issues when --pr is specified', async () => {

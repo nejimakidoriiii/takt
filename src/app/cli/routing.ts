@@ -97,10 +97,6 @@ async function resolvePrInput(
     async () => getGitProvider().fetchPrReviewComments(prNumber),
   );
 
-  if (prReview.reviews.length === 0 && prReview.comments.length === 0) {
-    throw new Error(`PR #${prNumber} has no review comments`);
-  }
-
   return { initialInput: formatPrReviewAsTask(prReview) };
 }
 

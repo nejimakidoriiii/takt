@@ -107,10 +107,6 @@ export function resolveTaskContent(options: PipelineExecutionOptions): TaskConte
       (provider) => provider.fetchPrReviewComments(options.prNumber!),
     );
     if (!prReview) return undefined;
-    if (prReview.reviews.length === 0 && prReview.comments.length === 0) {
-      error(`PR #${options.prNumber} has no review comments`);
-      return undefined;
-    }
     const task = formatPrReviewAsTask(prReview);
     success(`PR #${options.prNumber} fetched: "${prReview.title}"`);
     return { task, prBranch: prReview.headRefName };
