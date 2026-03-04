@@ -35,8 +35,14 @@ export interface CustomAgentConfig {
   claudeSkill?: string;
 }
 
-/** Observability configuration for runtime event logs */
-export interface ObservabilityConfig {
+/** Logging configuration for runtime output */
+export interface LoggingConfig {
+  /** Log level for global output behavior */
+  level?: 'debug' | 'info' | 'warn' | 'error';
+  /** Enable trace logging */
+  trace?: boolean;
+  /** Enable debug logging */
+  debug?: boolean;
   /** Enable provider stream event logging (default: false when undefined) */
   providerEvents?: boolean;
 }
@@ -93,7 +99,7 @@ export interface PersistedGlobalConfig {
   provider?: 'claude' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'mock';
   model?: string;
   /** @globalOnly */
-  observability?: ObservabilityConfig;
+  logging?: LoggingConfig;
   analytics?: AnalyticsConfig;
   /** @globalOnly */
   /** Directory for shared clones (worktree_dir in config). If empty, uses ../{clone-name} relative to project */
