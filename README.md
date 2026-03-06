@@ -256,7 +256,7 @@ await engine.run();
 | [Task Management](./docs/task-management.md) | Task queuing, execution, isolation |
 | [Data Flow](./docs/data-flow.md) | Internal data flow and architecture diagrams |
 | [CI/CD Integration](./docs/ci-cd.md) | GitHub Actions and pipeline mode |
-| [Provider Sandbox](./docs/provider-sandbox.md) | Sandbox configuration for providers |
+| [Provider Sandbox & Permissions](./docs/provider-sandbox.md) | Sandbox, permission modes, and network access for Codex / OpenCode / Claude |
 | [Changelog](./CHANGELOG.md) ([日本語](./docs/CHANGELOG.ja.md)) | Version history |
 | [Security Policy](./SECURITY.md) | Vulnerability reporting |
 

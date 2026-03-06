@@ -267,7 +267,7 @@ await engine.run();
 | [Task Management](./task-management.ja.md) | タスクの追加・実行・隔離 |
 | [データフロー](./data-flow.md) | 内部データフローとアーキテクチャ図 |
 | [CI/CD Integration](./ci-cd.ja.md) | GitHub Actions・パイプラインモード |
-| [Provider Sandbox](./provider-sandbox.md) | プロバイダーのサンドボックス設定 |
+| [Provider Sandbox & Permissions](./provider-sandbox.md) | Codex / OpenCode / Claude のサンドボックス、パーミッション、ネットワーク設定 |
 | [Changelog](../CHANGELOG.md) ([日本語](./CHANGELOG.ja.md)) | バージョン履歴 |
 | [Security Policy](../SECURITY.md) | 脆弱性の報告 |
 
