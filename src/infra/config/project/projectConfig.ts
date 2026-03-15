@@ -100,6 +100,7 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     runtime,
     piece_runtime_prepare,
     piece_arpeggio,
+    sync_conflict_resolver,
   } = parsedConfig;
   const normalizedProvider = normalizeConfigProviderReference(
     provider as RawProviderReference,
@@ -163,6 +164,9 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     runtime: normalizeRuntime(runtime),
     pieceRuntimePrepare: normalizePieceRuntimePreparePolicy(piece_runtime_prepare),
     pieceArpeggio: normalizePieceArpeggioPolicy(piece_arpeggio),
+    syncConflictResolver: sync_conflict_resolver ? {
+      autoApproveTools: sync_conflict_resolver.auto_approve_tools,
+    } : undefined,
   };
 }
 
@@ -253,7 +257,7 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
     'autoPr', 'draftPr', 'allowGitHooks', 'allowGitFilters', 'vcsProvider',
     'baseBranch', 'withSubmodules', 'branchNameStrategy', 'minimalOutput',
     'taskPollIntervalMs', 'interactivePreviewMovements', 'personaProviders',
-    'taktProviders', 'pieceRuntimePrepare', 'pieceArpeggio',
+    'taktProviders', 'pieceRuntimePrepare', 'pieceArpeggio', 'syncConflictResolver',
   ] as const) {
     delete savePayload[k];
   }
@@ -281,6 +285,13 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
     savePayload.piece_arpeggio = rawArpeggio;
   } else {
     delete savePayload.piece_arpeggio;
+  }
+  if (config.syncConflictResolver) {
+    savePayload.sync_conflict_resolver = {
+      auto_approve_tools: config.syncConflictResolver.autoApproveTools,
+    };
+  } else {
+    delete savePayload.sync_conflict_resolver;
   }
 
   const content = stringify(savePayload, { indent: 2 });
