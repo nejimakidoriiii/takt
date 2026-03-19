@@ -29,6 +29,10 @@ import {
   normalizeAnalytics,
   denormalizeAnalytics,
   formatIssuePath,
+  normalizePieceRuntimePreparePolicy,
+  denormalizePieceRuntimePreparePolicy,
+  normalizePieceArpeggioPolicy,
+  denormalizePieceArpeggioPolicy,
 } from './projectConfigTransforms.js';
 
 export type { ProjectConfig as ProjectLocalConfig } from '../types.js';
@@ -157,14 +161,8 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
       } | undefined
     ),
     runtime: normalizeRuntime(runtime),
-    pieceRuntimePrepare: piece_runtime_prepare ? {
-      customScripts: piece_runtime_prepare.custom_scripts,
-    } : undefined,
-    pieceArpeggio: piece_arpeggio ? {
-      customDataSourceModules: piece_arpeggio.custom_data_source_modules,
-      customMergeInlineJs: piece_arpeggio.custom_merge_inline_js,
-      customMergeFiles: piece_arpeggio.custom_merge_files,
-    } : undefined,
+    pieceRuntimePrepare: normalizePieceRuntimePreparePolicy(piece_runtime_prepare),
+    pieceArpeggio: normalizePieceArpeggioPolicy(piece_arpeggio),
   };
 }
 
@@ -251,21 +249,14 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
       delete savePayload.with_submodules;
     }
   }
-  delete savePayload.autoPr;
-  delete savePayload.draftPr;
-  delete savePayload.allowGitHooks;
-  delete savePayload.allowGitFilters;
-  delete savePayload.vcsProvider;
-  delete savePayload.baseBranch;
-  delete savePayload.withSubmodules;
-  delete savePayload.branchNameStrategy;
-  delete savePayload.minimalOutput;
-  delete savePayload.taskPollIntervalMs;
-  delete savePayload.interactivePreviewMovements;
-  delete savePayload.personaProviders;
-  delete savePayload.taktProviders;
-  delete savePayload.pieceRuntimePrepare;
-  delete savePayload.pieceArpeggio;
+  for (const k of [
+    'autoPr', 'draftPr', 'allowGitHooks', 'allowGitFilters', 'vcsProvider',
+    'baseBranch', 'withSubmodules', 'branchNameStrategy', 'minimalOutput',
+    'taskPollIntervalMs', 'interactivePreviewMovements', 'personaProviders',
+    'taktProviders', 'pieceRuntimePrepare', 'pieceArpeggio',
+  ] as const) {
+    delete savePayload[k];
+  }
 
   const rawPieceOverrides = denormalizePieceOverrides(config.pieceOverrides);
   if (rawPieceOverrides) {
@@ -279,19 +270,15 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
   } else {
     delete savePayload.runtime;
   }
-  if (config.pieceRuntimePrepare) {
-    savePayload.piece_runtime_prepare = {
-      custom_scripts: config.pieceRuntimePrepare.customScripts,
-    };
+  const rawRuntimePrepare = denormalizePieceRuntimePreparePolicy(config.pieceRuntimePrepare);
+  if (rawRuntimePrepare) {
+    savePayload.piece_runtime_prepare = rawRuntimePrepare;
   } else {
     delete savePayload.piece_runtime_prepare;
   }
-  if (config.pieceArpeggio) {
-    savePayload.piece_arpeggio = {
-      custom_data_source_modules: config.pieceArpeggio.customDataSourceModules,
-      custom_merge_inline_js: config.pieceArpeggio.customMergeInlineJs,
-      custom_merge_files: config.pieceArpeggio.customMergeFiles,
-    };
+  const rawArpeggio = denormalizePieceArpeggioPolicy(config.pieceArpeggio);
+  if (rawArpeggio) {
+    savePayload.piece_arpeggio = rawArpeggio;
   } else {
     delete savePayload.piece_arpeggio;
   }
