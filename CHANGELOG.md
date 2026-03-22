@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.33.0] - 2026-03-20
+## [0.33.0] - 2026-03-22
 
 ### Added
 
@@ -29,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `.takt/.gitignore` のファセットパスが実際のディレクトリ構造と不一致だった問題を修正 (#535)
 - レビューピースの gather モードでブランチ検出が不正確だった問題を修正（完全一致を要求するよう変更） (#523)
 - レビューピースで reject findings のフォーマットが正しく処理されない問題を修正 (#528)
+- パイプラインモードでタスクブランチが PR 作成前に push されず、PR 作成が失敗する問題を修正
 
 ### Internal
 
@@ -39,6 +40,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - プロジェクト設定・グローバル設定のテストカバレッジを追加
 - MCP サーバーヘルパー、ポリシー正規化、conflict resolver ヘルパーのリファクタリング
 - ドキュメント更新（レビューピース名の修正、ビルトインカタログ更新）
+- ビルド/lint/テスト品質ゲートの追加と E2E テスト環境の CLAUDECODE 環境変数分離
+- テスト契約チェックのビルトインファセット強化（review-test, write-tests-first, testing-review）
+- タスク auto-PR の E2E テストを追加
 
 ## [0.32.2] - 2026-03-17
 
