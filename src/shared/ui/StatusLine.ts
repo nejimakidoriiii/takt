@@ -38,16 +38,15 @@ class StatusLineImpl {
     this.rawStdoutWrite = process.stdout.write.bind(process.stdout) as RawWrite;
     const rawStderrWrite = process.stderr.write.bind(process.stderr) as RawWrite;
     const raw = this.rawStdoutWrite;
-    const self = this;
 
     const wrapWrite = (origRaw: RawWrite) =>
-      function (chunk: unknown): boolean {
-        if (self.rendering) return origRaw(String(chunk));
+      (chunk: unknown): boolean => {
+        if (this.rendering) return origRaw(String(chunk));
         raw('\r\x1b[K');
         const result = origRaw(String(chunk));
-        if (String(chunk).includes('\n')) self.render();
+        if (String(chunk).includes('\n')) this.render();
         return result;
-      } as typeof process.stdout.write;
+      };
 
     process.stdout.write = wrapWrite(raw);
     process.stderr.write = wrapWrite(rawStderrWrite);

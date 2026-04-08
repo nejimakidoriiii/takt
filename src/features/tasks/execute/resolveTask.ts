@@ -4,7 +4,7 @@ import { resolvePieceConfigValue } from '../../../infra/config/index.js';
 import {
   type TaskInfo,
   buildTaskInstruction,
-  createSharedClone,
+  createSharedCloneAbortable,
   resolveBaseBranch,
   resolveCloneBaseDir,
   branchExists,
@@ -163,13 +163,13 @@ export async function resolveTaskExecution(
       const result = await withProgress(
         'Creating clone...',
         (cloneResult) => `Clone created: ${cloneResult.path} (branch: ${cloneResult.branch})`,
-        async () => createSharedClone(defaultCwd, {
+        async () => createSharedCloneAbortable(defaultCwd, {
           worktree: data.worktree!,
           branch: data.branch,
           ...(preferredBaseBranch ? { baseBranch: preferredBaseBranch } : {}),
           taskSlug,
           issueNumber: data.issue,
-        }),
+        }, abortSignal),
       );
       throwIfAborted(abortSignal);
       execCwd = result.path;
