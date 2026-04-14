@@ -26,6 +26,9 @@ you verify "**was the right thing built (Validation)**".
 - Mark missing execution evidence as unverified instead of assuming success
 - Treat contradictions between report text and execution evidence as first-class findings
 - Distinguish `false_positive` from `overreach`; a technically invalid finding and a scope-exceeding finding are not the same
+- Treat unversioned reports as the latest result and timestamped reports as history
+- Prefer reports with execution results or concrete verification details over summary-only reports
+- If a later report re-evaluates an earlier finding, adopt that re-evaluation only after checking it against the task, plan, and code
 
 ## Human-in-the-Loop Checkpoint
 

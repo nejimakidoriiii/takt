@@ -34,6 +34,15 @@ Verify existing evidence for tests, builds, and functional checks, then perform 
    - If evidence is missing, mark the item as unverified rather than successful
    - If report text conflicts with execution evidence, call out the inconsistency explicitly
 
+**How to read reports:**
+- For reports with the same base name, treat the unversioned file as the latest result and `{report}.{timestamp}` files as history
+- When re-evaluating prior findings, compare the unversioned file with the most recent timestamped history file and verify that the meaning of `new / persists / resolved / reopened` is preserved
+- Treat summary reports as summaries, not as primary evidence. Prefer reports that record execution results, reviewer reports with concrete verification details, and then actual code
+- You may treat `Build Results` / `Test Results` sections in reports that record execution results as primary evidence
+- Treat reviewer claims such as "confirmed success" as supporting evidence only when they state the verified target, what was checked, and the observed result
+- If pieces of evidence conflict, prioritize them in this order: `execution-result report > reviewer report with concrete verification details > summary report`
+- If a later report reclassifies an earlier finding as `resolved`, `false_positive`, or `overreach`, decide whether to accept that reclassification by checking it against the task, plan, and code
+
 **Report verification:** Read all reports in the Report Directory and
 check whether any blocking finding remains unresolved and whether those findings are themselves valid.
 

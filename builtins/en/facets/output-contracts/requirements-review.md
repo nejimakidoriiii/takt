@@ -41,6 +41,11 @@
 |---|------------|------------|--------------------------|---------------------|-------|----------------|
 | 1 | REQ-REOPENED-src-file-L55 | req-gap | `Previously fixed at file:line` | `Recurred at file:line` | Issue description | Fix approach |
 
+## Verification Evidence
+- Build: {Verified target, what was checked, and observed result; or state that it was unverified}
+- Tests: {Verified target, what was checked, and observed result; or state that it was unverified}
+- Functional check: {Verified target, what was checked, and observed result; or state that it was unverified}
+
 ## Rejection Gate
 - REJECT is valid only when at least one finding exists in `new`, `persists`, or `reopened`
 - Findings without `finding_id` are invalid

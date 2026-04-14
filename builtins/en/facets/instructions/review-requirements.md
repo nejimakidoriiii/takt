@@ -13,9 +13,11 @@ Review {report:coder-decisions.md} to understand the recorded design decisions.
 - However, also evaluate whether the design decisions themselves are sound, and flag any problems
 
 **Previous finding tracking (required):**
-- First, extract open findings from "Previous Response"
+- First, inspect the review result previously produced by this step and its timestamped history in the Report Directory, treating the unversioned file as the latest result and the most recent timestamped file as the previous result
+- If "Previous Response" is available, use it only as supporting context; use report history as the source of truth for finding state transitions
 - Assign `finding_id` to each finding and classify current status as `new / persists / resolved / reopened`
 - If status is `persists`, provide concrete unresolved evidence (file/line)
+- Do not drop open findings from the prior report when producing the current report
 
 ## Judgment Procedure
 
@@ -28,5 +30,6 @@ Review {report:coder-decisions.md} to understand the recorded design decisions.
    - Do not mark a row `satisfied` when only part of the cases is covered
 5. List out-of-scope changes and judge whether they are justified or unnecessary
 6. Reclassify prior findings into `new / persists / resolved / reopened`
-7. For each detected issue, classify it as blocking/non-blocking based on the Policy's scope table and judgment rules
-8. If there is even one blocking issue in `new`, `persists`, or `reopened`, judge as REJECT
+7. When citing build, test, or functional verification as evidence, record the verified target, what was checked, and the observed result in the report
+8. For each detected issue, classify it as blocking/non-blocking based on the Policy's scope table and judgment rules
+9. If there is even one blocking issue in `new`, `persists`, or `reopened`, judge as REJECT
