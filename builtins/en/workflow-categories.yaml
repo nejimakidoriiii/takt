@@ -2,9 +2,10 @@ workflow_categories:
   🚀 Quick Start:
     workflows:
       - default
-      - frontend-mini
-      - backend-mini
-      - compound-eye
+      - default-high
+      - frontend
+      - backend
+      - dual
   ⚡ Mini:
     workflows:
       - frontend-mini
@@ -57,6 +58,8 @@ workflow_categories:
   🎵 TAKT Development:
     workflows:
       - takt-default
+      - takt-default-refresh-all
+      - takt-default-refresh-fast
       - review-takt-default
       - review-fix-takt-default
   Others:
