@@ -25,19 +25,27 @@ function createStep(fileName: string): WorkflowStep {
 
 function createContext(
   reportDir: string,
-  onBuildResumeOptions?: (overrides: Pick<RunAgentOptions, 'maxTurns'>) => void,
+  options: {
+    lastResponse?: string;
+    initialSessionId?: string | null;
+    onBuildResumeOptions?: (overrides: Pick<RunAgentOptions, 'maxTurns'>) => void;
+  } = {},
 ): PhaseRunnerContext {
-  let currentSessionId = 'session-1';
+  const currentLastResponse = options.lastResponse ?? 'Phase 1 result';
+  let currentSessionId = options.initialSessionId === undefined
+    ? 'session-1'
+    : options.initialSessionId ?? undefined;
   return {
     cwd: reportDir,
     reportDir,
+    lastResponse: currentLastResponse,
     getSessionId: (_persona: string) => currentSessionId,
     buildResumeOptions: (
       _step,
       _sessionId,
       overrides,
     ) => {
-      onBuildResumeOptions?.(overrides);
+      options.onBuildResumeOptions?.(overrides);
       return { cwd: reportDir };
     },
     buildNewSessionReportOptions: (
@@ -169,8 +177,10 @@ describe('runReportPhase report history behavior', () => {
     const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
     const step = createStep('07-permissions-check.md');
     const capturedOverrides: Array<Pick<RunAgentOptions, 'maxTurns'>> = [];
-    const ctx = createContext(reportDir, (overrides) => {
-      capturedOverrides.push(overrides);
+    const ctx = createContext(reportDir, {
+      onBuildResumeOptions: (overrides) => {
+        capturedOverrides.push(overrides);
+      },
     });
     queueRunAgentResponses([{
       persona: 'reviewers',
@@ -262,5 +272,49 @@ describe('runReportPhase report history behavior', () => {
 
     // Then
     expect(resumedSessionIds).toEqual(['session-1', 'claude-headless-session-token']);
+  });
+
+  it('should archive the previous report when repeated team_leader-style runs start without a root session', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('09-team-leader-report.md');
+    const firstRunContext = createContext(reportDir, {
+      lastResponse: 'First aggregated output',
+      initialSessionId: null,
+    });
+    const secondRunContext = createContext(reportDir, {
+      lastResponse: 'Second aggregated output',
+      initialSessionId: null,
+    });
+    queueRunAgentResponses([
+      {
+        persona: 'reviewers',
+        status: 'done',
+        content: 'First report from new session',
+        timestamp: new Date('2026-02-10T06:30:17Z'),
+        sessionId: 'team-leader-report-session-1',
+      },
+      {
+        persona: 'reviewers',
+        status: 'done',
+        content: 'Second report from new session',
+        timestamp: new Date('2026-02-10T06:31:17Z'),
+        sessionId: 'team-leader-report-session-2',
+      },
+    ]);
+
+    // When
+    await runReportPhase(step, 1, firstRunContext);
+    await runReportPhase(step, 2, secondRunContext);
+
+    // Then
+    const latestPath = join(reportDir, '09-team-leader-report.md');
+    expect(readFileSync(latestPath, 'utf-8')).toBe('Second report from new session');
+
+    const versionedFiles = readdirSync(reportDir).filter((file) => file !== '09-team-leader-report.md');
+    expect(versionedFiles).toHaveLength(1);
+
+    const archivedContent = readFileSync(join(reportDir, versionedFiles[0]!), 'utf-8');
+    expect(archivedContent).toBe('First report from new session');
   });
 });
