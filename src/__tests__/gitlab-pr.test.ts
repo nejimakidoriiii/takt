@@ -34,10 +34,29 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
   getErrorMessage: (e: unknown) => String(e),
 }));
 
-import { findExistingMr, createMergeRequest, commentOnMr, fetchMrReviewComments, mergeMr } from '../infra/gitlab/pr.js';
+import { findExistingMr, listOpenMrs, createMergeRequest, commentOnMr, fetchMrReviewComments, mergeMr } from '../infra/gitlab/pr.js';
+
+const taktManagedLabel = 'takt-managed';
+
+function withGlabApiResponse(body: unknown, nextPath?: string): string {
+  const headers = [
+    'HTTP/2 200 OK',
+    'content-type: application/json',
+    ...(nextPath ? [`link: <https://gitlab.example.com/api/v4/${nextPath}>; rel="next"`] : []),
+  ];
+  return `${headers.join('\n')}\n\n${JSON.stringify(body)}`;
+}
+
+function getApiPath(call: unknown[]): string {
+  const args = call[1] as string[];
+  return args[2] as string;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockExecFileSync.mockReset();
+  mockCheckGlabCli.mockReset();
+  mockCheckGlabCli.mockReturnValue({ available: true });
 });
 
 describe('findExistingMr', () => {
@@ -105,11 +124,240 @@ describe('findExistingMr', () => {
   });
 });
 
-describe('createMergeRequest', () => {
-  it('成功時は success: true と URL を返す', () => {
-    // Given
-    mockExecFileSync.mockReturnValue('https://gitlab.com/org/repo/-/merge_requests/1\n');
+describe('listOpenMrs', () => {
+  it('open MR list を取得して workflow 用の項目へマッピングする', () => {
+    mockExecFileSync.mockReturnValue(withGlabApiResponse([
+      {
+        iid: 42,
+        author: { username: 'nrslib' },
+        target_branch: 'improve',
+        source_branch: 'task/42',
+        description: '## Summary\n\nTask summary\n\n## Execution Report\n\nWorkflow `default` completed successfully.\n\n<!-- takt:managed -->',
+        labels: [taktManagedLabel],
+        source_project_id: 1,
+        target_project_id: 1,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+    ]));
 
+    const result = listOpenMrs('/project');
+
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'glab',
+      ['api', '--include', 'projects/:id/merge_requests?state=opened&per_page=100&page=1'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(result).toEqual([
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/42',
+        managed_by_takt: true,
+        labels: [taktManagedLabel],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+    ]);
+  });
+
+  it('glab CLI 利用不可時の判定を持たず、呼び出し失敗をそのまま伝播する', () => {
+    mockCheckGlabCli.mockReturnValueOnce({ available: false, error: 'glab unavailable' });
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw new Error('glab unavailable');
+    });
+
+    expect(() => listOpenMrs('/project')).toThrow('glab unavailable');
+    expect(mockExecFileSync).toHaveBeenCalled();
+  });
+
+  it('100件を超える open MR を後続ページまで取得する', () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      iid: index + 1,
+      author: { username: `user-${index + 1}` },
+      target_branch: 'improve',
+      source_branch: `task/${index + 1}`,
+      description: 'Human-managed body',
+      labels: [],
+      source_project_id: 1,
+      target_project_id: 1,
+      draft: false,
+      updated_at: `2026-04-20T12:${String(index % 60).padStart(2, '0')}:00Z`,
+    }));
+
+    mockExecFileSync
+      .mockReturnValueOnce(withGlabApiResponse(
+        firstPage,
+        'projects/1/merge_requests?state=opened&per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGlabApiResponse([
+        {
+          iid: 101,
+          author: { username: 'nrslib' },
+          target_branch: 'improve',
+          source_branch: 'task/101',
+          description: '## Summary\n\nTask summary\n\n## Execution Report\n\nTask completed successfully.\n\n<!-- takt:managed -->',
+          labels: [taktManagedLabel],
+          source_project_id: 1,
+          target_project_id: 1,
+          draft: false,
+          updated_at: '2026-04-21T00:00:00Z',
+        },
+      ]));
+
+    const result = listOpenMrs('/project');
+
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      1,
+      'glab',
+      ['api', '--include', 'projects/:id/merge_requests?state=opened&per_page=100&page=1'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      2,
+      'glab',
+      ['api', '--include', 'projects/1/merge_requests?state=opened&per_page=100&page=2'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(result).toHaveLength(101);
+    expect(result[100]).toEqual({
+      number: 101,
+      author: 'nrslib',
+      base_branch: 'improve',
+      head_branch: 'task/101',
+      managed_by_takt: true,
+      labels: [taktManagedLabel],
+      same_repository: true,
+      draft: false,
+      updated_at: '2026-04-21T00:00:00Z',
+    });
+  });
+
+  it('fork MR は same_repository: false にマッピングする', () => {
+    mockExecFileSync.mockReturnValue(withGlabApiResponse([
+      {
+        iid: 52,
+        author: { username: 'fork-user' },
+        target_branch: 'improve',
+        source_branch: 'takt/52/forked-branch',
+        description: 'Human-managed body',
+        labels: [taktManagedLabel],
+        source_project_id: 2,
+        target_project_id: 1,
+        draft: false,
+        updated_at: '2026-04-21T01:00:00Z',
+      },
+    ]));
+
+    const result = listOpenMrs('/project');
+
+    expect(result).toEqual([
+      {
+        number: 52,
+        author: 'fork-user',
+        base_branch: 'improve',
+        head_branch: 'takt/52/forked-branch',
+        managed_by_takt: false,
+        labels: [taktManagedLabel],
+        same_repository: false,
+        draft: false,
+        updated_at: '2026-04-21T01:00:00Z',
+      },
+    ]);
+  });
+
+  it('pagination link が上限を超えて続く場合は明示エラーにする', () => {
+    let page = 1;
+    mockExecFileSync.mockImplementation(() => {
+      const response = withGlabApiResponse(
+        [{
+          iid: page,
+          author: { username: 'nrslib' },
+          target_branch: 'improve',
+          source_branch: `task/${page}`,
+          description: 'Human-managed body',
+          labels: [],
+          source_project_id: 1,
+          target_project_id: 1,
+          draft: false,
+          updated_at: '2026-04-21T00:00:00Z',
+        }],
+        `projects/1/merge_requests?state=opened&per_page=100&page=${page + 1}`,
+      );
+      page += 1;
+      return response;
+    });
+
+    expect(() => listOpenMrs('/project')).toThrow(
+      'Pagination limit exceeded while fetching open merge request list (>100 pages)',
+    );
+  });
+
+  it('marker 付き same-repo takt MR は label がなくても managed_by_takt: true にマッピングする', () => {
+    mockExecFileSync.mockReturnValue(withGlabApiResponse([
+      {
+        iid: 78,
+        author: { username: 'nrslib' },
+        target_branch: 'improve',
+        source_branch: 'takt/78/managed-without-label',
+        description: '## Summary\n\nTask summary\n\n## Execution Report\n\nTask completed successfully.\n\n<!-- takt:managed -->',
+        labels: [],
+        source_project_id: 1,
+        target_project_id: 1,
+        draft: false,
+        updated_at: '2026-04-21T02:30:00Z',
+      },
+    ]));
+
+    expect(listOpenMrs('/project')).toEqual([
+      expect.objectContaining({
+        number: 78,
+        managed_by_takt: true,
+        labels: [],
+        same_repository: true,
+      }),
+    ]);
+  });
+
+  it('legacy な TAKT MR 本文だけでは managed_by_takt: false にマッピングする', () => {
+    mockExecFileSync.mockReturnValue(withGlabApiResponse([
+      {
+        iid: 77,
+        author: { username: 'nrslib' },
+        target_branch: 'improve',
+        source_branch: 'takt/77/legacy-task',
+        description: '## Summary\n\nTask summary\n\n## Execution Report\n\nWorkflow `default` completed successfully.',
+        labels: [],
+        source_project_id: 1,
+        target_project_id: 1,
+        draft: false,
+        updated_at: '2026-04-21T02:00:00Z',
+      },
+    ]));
+
+    expect(listOpenMrs('/project')).toEqual([
+      expect.objectContaining({
+        number: 77,
+        managed_by_takt: false,
+      }),
+    ]);
+  });
+});
+
+describe('createMergeRequest', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockImplementation((_command: unknown, args: unknown[]) => {
+      const argv = args as string[];
+      if (argv[0] === 'mr' && argv[1] === 'create') {
+        return 'https://gitlab.com/org/repo/-/merge_requests/1\n';
+      }
+      return '';
+    });
+  });
+
+  it('成功時は success: true と URL を返す', () => {
     // When
     const result = createMergeRequest({
       branch: 'feat/my-branch',
@@ -124,8 +372,6 @@ describe('createMergeRequest', () => {
 
   it('--source-branch オプションで branch を渡す（--head ではない）', () => {
     // Given
-    mockExecFileSync.mockReturnValue('https://gitlab.com/org/repo/-/merge_requests/2\n');
-
     // When
     createMergeRequest({
       branch: 'feat/my-branch',
@@ -134,15 +380,13 @@ describe('createMergeRequest', () => {
     }, '/project');
 
     // Then
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).toContain('--source-branch');
     expect(call[1]).not.toContain('--head');
   });
 
   it('--description オプションで body を渡す（--body ではない）', () => {
     // Given
-    mockExecFileSync.mockReturnValue('https://gitlab.com/org/repo/-/merge_requests/3\n');
-
     // When
     createMergeRequest({
       branch: 'feat/my-branch',
@@ -151,15 +395,13 @@ describe('createMergeRequest', () => {
     }, '/project');
 
     // Then
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).toContain('--description');
     expect(call[1]).not.toContain('--body');
   });
 
   it('draft: true の場合、args に --draft が含まれる', () => {
     // Given
-    mockExecFileSync.mockReturnValue('https://gitlab.com/org/repo/-/merge_requests/4\n');
-
     // When
     createMergeRequest({
       branch: 'feat/my-branch',
@@ -169,14 +411,12 @@ describe('createMergeRequest', () => {
     }, '/project');
 
     // Then
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).toContain('--draft');
   });
 
   it('draft: false の場合、args に --draft が含まれない', () => {
     // Given
-    mockExecFileSync.mockReturnValue('https://gitlab.com/org/repo/-/merge_requests/5\n');
-
     // When
     createMergeRequest({
       branch: 'feat/my-branch',
@@ -186,14 +426,12 @@ describe('createMergeRequest', () => {
     }, '/project');
 
     // Then
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).not.toContain('--draft');
   });
 
   it('base が指定された場合、--target-branch で渡す', () => {
     // Given
-    mockExecFileSync.mockReturnValue('https://gitlab.com/org/repo/-/merge_requests/6\n');
-
     // When
     createMergeRequest({
       branch: 'feat/my-branch',
@@ -203,9 +441,42 @@ describe('createMergeRequest', () => {
     }, '/project');
 
     // Then
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).toContain('--target-branch');
     expect(call[1]).toContain('develop');
+  });
+
+  it('labels が指定された場合だけ --label をそのまま渡す', () => {
+    createMergeRequest({
+      branch: 'feat/my-branch',
+      title: 'My MR',
+      body: 'MR body',
+      labels: ['release-blocker', 'automation'],
+    }, '/project');
+
+    const createCall = mockExecFileSync.mock.calls.find(
+      (args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create',
+    );
+    expect(createCall?.[1]).toEqual(expect.arrayContaining([
+      '--label',
+      'release-blocker',
+      '--label',
+      'automation',
+    ]));
+  });
+
+  it('labels 未指定時は label 関連の副作用を追加しない', () => {
+    createMergeRequest({
+      branch: 'feat/my-branch',
+      title: 'My MR',
+      body: 'MR body',
+    }, '/project');
+
+    const createCall = mockExecFileSync.mock.calls.find(
+      (args) => (args[1] as string[])[0] === 'mr' && (args[1] as string[])[1] === 'create',
+    );
+    expect(createCall?.[1]).not.toContain('--label');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 
   it('glab mr create が失敗した場合は success: false を返す', () => {
@@ -577,18 +848,18 @@ describe('fetchMrReviewComments', () => {
 
     // Then: verify diffs API call has per_page (call index 1, after mr view)
     const diffsCall = mockExecFileSync.mock.calls[1];
-    const diffsApiPath = diffsCall[1][1] as string;
+    const diffsApiPath = getApiPath(diffsCall);
     expect(diffsApiPath).toContain('per_page=100');
     expect(diffsApiPath).toContain('diffs');
 
     // Then: verify notes API call has per_page (call index 2)
     const notesCall = mockExecFileSync.mock.calls[2];
-    const notesApiPath = notesCall[1][1] as string;
+    const notesApiPath = getApiPath(notesCall);
     expect(notesApiPath).toContain('per_page=100');
 
     // Then: verify discussions API call has per_page (call index 3)
     const discussionsCall = mockExecFileSync.mock.calls[3];
-    const discussionsApiPath = discussionsCall[1][1] as string;
+    const discussionsApiPath = getApiPath(discussionsCall);
     expect(discussionsApiPath).toContain('per_page=100');
   });
 
@@ -606,8 +877,11 @@ describe('fetchMrReviewComments', () => {
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(mrViewResponse))
       .mockReturnValueOnce(JSON.stringify([])) // diffs API
-      .mockReturnValueOnce(JSON.stringify(firstPageNotes))
-      .mockReturnValueOnce(JSON.stringify(secondPageNotes))
+      .mockReturnValueOnce(withGlabApiResponse(
+        firstPageNotes,
+        'projects/1/merge_requests/300/notes?per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGlabApiResponse(secondPageNotes))
       .mockReturnValueOnce(JSON.stringify([])); // discussions (single page)
 
     // When
@@ -632,8 +906,11 @@ describe('fetchMrReviewComments', () => {
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(mrViewResponse))
       .mockReturnValueOnce(JSON.stringify([])) // diffs API
-      .mockReturnValueOnce(JSON.stringify(firstPage))
-      .mockReturnValueOnce(JSON.stringify(secondPage))
+      .mockReturnValueOnce(withGlabApiResponse(
+        firstPage,
+        'projects/1/merge_requests/301/notes?per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGlabApiResponse(secondPage))
       .mockReturnValueOnce(JSON.stringify([])); // discussions
 
     // When
@@ -641,13 +918,13 @@ describe('fetchMrReviewComments', () => {
 
     // Then: verify page=1 for notes (call index 2, after mr view + diffs API)
     const notesCall1 = mockExecFileSync.mock.calls[2];
-    const apiPath1 = notesCall1[1][1] as string;
+    const apiPath1 = getApiPath(notesCall1);
     expect(apiPath1).toContain('page=1');
     expect(apiPath1).toContain('notes');
 
     // Then: verify page=2 for notes
     const notesCall2 = mockExecFileSync.mock.calls[3];
-    const apiPath2 = notesCall2[1][1] as string;
+    const apiPath2 = getApiPath(notesCall2);
     expect(apiPath2).toContain('page=2');
     expect(apiPath2).toContain('notes');
   });
@@ -675,8 +952,11 @@ describe('fetchMrReviewComments', () => {
       .mockReturnValueOnce(JSON.stringify(mrViewResponse))
       .mockReturnValueOnce(JSON.stringify([])) // diffs API
       .mockReturnValueOnce(JSON.stringify([])) // notes (empty, single page)
-      .mockReturnValueOnce(JSON.stringify(firstPageDiscussions))
-      .mockReturnValueOnce(JSON.stringify(secondPageDiscussions));
+      .mockReturnValueOnce(withGlabApiResponse(
+        firstPageDiscussions,
+        'projects/1/merge_requests/302/discussions?per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGlabApiResponse(secondPageDiscussions));
 
     // When
     const result = fetchMrReviewComments(302, '/project');
@@ -714,21 +994,24 @@ describe('fetchMrReviewComments', () => {
       .mockReturnValueOnce(JSON.stringify(mrViewResponse))
       .mockReturnValueOnce(JSON.stringify([])) // diffs API
       .mockReturnValueOnce(JSON.stringify([])) // notes
-      .mockReturnValueOnce(JSON.stringify(firstPage))
-      .mockReturnValueOnce(JSON.stringify(secondPage));
+      .mockReturnValueOnce(withGlabApiResponse(
+        firstPage,
+        'projects/1/merge_requests/303/discussions?per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGlabApiResponse(secondPage));
 
     // When
     fetchMrReviewComments(303, '/project');
 
     // Then: discussions page=1 (call index 3, after mr view + diffs API + notes)
     const discCall1 = mockExecFileSync.mock.calls[3];
-    const discPath1 = discCall1[1][1] as string;
+    const discPath1 = getApiPath(discCall1);
     expect(discPath1).toContain('page=1');
     expect(discPath1).toContain('discussions');
 
     // Then: discussions page=2
     const discCall2 = mockExecFileSync.mock.calls[4];
-    const discPath2 = discCall2[1][1] as string;
+    const discPath2 = getApiPath(discCall2);
     expect(discPath2).toContain('page=2');
     expect(discPath2).toContain('discussions');
   });
@@ -805,7 +1088,7 @@ describe('fetchMrReviewComments', () => {
     const diffsCall = mockExecFileSync.mock.calls[1];
     expect(diffsCall[0]).toBe('glab');
     expect(diffsCall[1][0]).toBe('api');
-    const diffsApiPath = diffsCall[1][1] as string;
+    const diffsApiPath = getApiPath(diffsCall);
     expect(diffsApiPath).toContain('merge_requests/500/diffs');
   });
 

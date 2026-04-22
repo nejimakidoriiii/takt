@@ -6,9 +6,10 @@
 
 import { execFileSync } from 'node:child_process';
 import { createLogger, getErrorMessage } from '../../shared/utils/index.js';
+import { fetchPaginatedApi } from '../git/paginated-api.js';
+import { isTaktManagedPrBody } from '../git/format.js';
 import { checkGhCli } from './issue.js';
-import { MAX_PAGES } from '../git/constants.js';
-import type { CreatePrOptions, CreatePrResult, ExistingPr, CommentResult, MergeResult, PrReviewData, PrReviewComment } from '../git/types.js';
+import type { CreatePrOptions, CreatePrResult, ExistingPr, CommentResult, MergeResult, PrListItem, PrReviewData, PrReviewComment } from '../git/types.js';
 
 const log = createLogger('github-pr');
 
@@ -31,6 +32,60 @@ export function findExistingPr(branch: string, cwd: string): ExistingPr | undefi
     log.debug('gh pr list failed, treating as no PR', { error: getErrorMessage(e) });
     return undefined;
   }
+}
+
+interface GhPrListResponseItem {
+  number: number;
+  user: { login: string };
+  base: { ref: string; repo: { full_name: string } | null };
+  head: { ref: string; repo: { full_name: string } | null };
+  body: string | null;
+  labels: Array<{ name: string }>;
+  draft: boolean;
+  updated_at: string;
+}
+
+interface GhRepoViewResponse {
+  nameWithOwner: string;
+}
+
+const OPEN_PRS_PER_PAGE = 100;
+const INLINE_REVIEW_COMMENTS_PER_PAGE = 100;
+
+function resolveRepositoryNameWithOwner(cwd: string): string {
+  const output = execFileSync(
+    'gh',
+    ['repo', 'view', '--json', 'nameWithOwner'],
+    { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  const repo = JSON.parse(output) as GhRepoViewResponse;
+  if (!repo.nameWithOwner) {
+    throw new Error('gh repo view did not return nameWithOwner');
+  }
+  return repo.nameWithOwner;
+}
+
+export function listOpenPrs(cwd: string): PrListItem[] {
+  const repo = resolveRepositoryNameWithOwner(cwd);
+  const prs = fetchPaginatedApi<GhPrListResponseItem>({
+    command: 'gh',
+    cwd,
+    context: 'open pull request list',
+    initialEndpoint: `repos/${repo}/pulls?state=open&per_page=${OPEN_PRS_PER_PAGE}&page=1`,
+    parsePage: (body) => JSON.parse(body) as GhPrListResponseItem[],
+  });
+
+  return prs.map((pr) => ({
+    number: pr.number,
+    author: pr.user.login,
+    base_branch: pr.base.ref,
+    head_branch: pr.head.ref,
+    managed_by_takt: isTaktManagedPrBody(pr.body),
+    labels: pr.labels.map((label) => label.name),
+    same_repository: pr.head.repo?.full_name === pr.base.repo?.full_name,
+    draft: pr.draft,
+    updated_at: pr.updated_at,
+  }));
 }
 
 export function commentOnPr(prNumber: number, body: string, cwd: string): CommentResult {
@@ -81,8 +136,6 @@ interface GhPrApiReviewComment {
   user: { login: string };
 }
 
-const INLINE_REVIEW_COMMENTS_PER_PAGE = 100;
-
 /** Raw JSON shape from GitHub API (line/original_line are nullable) */
 interface GhPrApiRawReviewComment {
   body: string;
@@ -103,28 +156,16 @@ function normalizeReviewComment(raw: GhPrApiRawReviewComment): GhPrApiReviewComm
 }
 
 function fetchInlineReviewComments(owner: string, repo: string, prNumber: number, cwd: string): GhPrApiReviewComment[] {
-  const comments: GhPrApiReviewComment[] = [];
-  let page = 1;
-
-  while (page <= MAX_PAGES) {
-    const rawInlineReviewComments = execFileSync(
-      'gh',
-      ['api', `/repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=${INLINE_REVIEW_COMMENTS_PER_PAGE}&page=${page}`],
-      { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    );
-    const parsed = JSON.parse(rawInlineReviewComments) as GhPrApiRawReviewComment[];
-    const normalized = parsed.map(normalizeReviewComment);
-
-    comments.push(...normalized);
-
-    if (parsed.length < INLINE_REVIEW_COMMENTS_PER_PAGE) {
-      break;
-    }
-
-    page += 1;
-  }
-
-  return comments;
+  return fetchPaginatedApi<GhPrApiReviewComment>({
+    command: 'gh',
+    cwd,
+    context: `pull request #${prNumber} inline review comments`,
+    initialEndpoint: `/repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=${INLINE_REVIEW_COMMENTS_PER_PAGE}&page=1`,
+    parsePage: (body) => {
+      const parsed = JSON.parse(body) as GhPrApiRawReviewComment[];
+      return parsed.map(normalizeReviewComment);
+    },
+  });
 }
 
 function parseRepositoryFromPrUrl(prUrl: string): { owner: string; repo: string } {
@@ -217,6 +258,10 @@ export function createPullRequest(options: CreatePrOptions, cwd: string): Create
 
   if (options.draft) {
     args.push('--draft');
+  }
+
+  for (const label of options.labels ?? []) {
+    args.push('--label', label);
   }
 
   log.info('Creating PR', { branch: options.branch, title: options.title, draft: options.draft });

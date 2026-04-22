@@ -19,13 +19,32 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
   getErrorMessage: (e: unknown) => String(e),
 }));
 
-import { findExistingPr, createPullRequest, fetchPrReviewComments, mergePr } from '../infra/github/pr.js';
-import { buildPrBody, formatPrReviewAsTask } from '../infra/git/format.js';
+import { findExistingPr, listOpenPrs, createPullRequest, fetchPrReviewComments, mergePr } from '../infra/github/pr.js';
+import { checkGhCli } from '../infra/github/issue.js';
+import {
+  buildPrBody,
+  formatPrReviewAsTask,
+  TAKT_MANAGED_PR_MARKER,
+} from '../infra/git/format.js';
 import type { Issue, PrReviewData } from '../infra/git/types.js';
+
+const taktManagedLabel = 'takt-managed';
+
+function withGhApiResponse(body: unknown, nextPath?: string): string {
+  const headers = [
+    'HTTP/2 200 OK',
+    'content-type: application/json',
+    ...(nextPath ? [`link: <https://api.github.com${nextPath}>; rel="next"`] : []),
+  ];
+  return `${headers.join('\n')}\n\n${JSON.stringify(body)}`;
+}
 
 describe('findExistingPr', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExecFileSync.mockReset();
+    vi.mocked(checkGhCli).mockReset();
+    vi.mocked(checkGhCli).mockReturnValue({ available: true });
   });
 
   it('オープンな PR がある場合はその PR を返す', () => {
@@ -53,9 +72,244 @@ describe('findExistingPr', () => {
   });
 });
 
+describe('listOpenPrs', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReset();
+    vi.mocked(checkGhCli).mockReset();
+    vi.mocked(checkGhCli).mockReturnValue({ available: true });
+  });
+
+  it('open PR list を取得して workflow 用の項目へマッピングする', () => {
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ nameWithOwner: 'org/repo' }))
+      .mockReturnValueOnce(withGhApiResponse([
+        {
+          number: 42,
+          user: { login: 'nrslib' },
+          base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+          head: { ref: 'task/42', repo: { full_name: 'org/repo' } },
+          body: `## Summary\n\nTask summary\n\n## Execution Report\n\nWorkflow \`default\` completed successfully.\n\n${TAKT_MANAGED_PR_MARKER}`,
+          labels: [{ name: taktManagedLabel }],
+          draft: false,
+          updated_at: '2026-04-20T12:00:00Z',
+        },
+      ]));
+
+    const result = listOpenPrs('/project');
+
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      ['repo', 'view', '--json', 'nameWithOwner'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      ['api', '--include', 'repos/org/repo/pulls?state=open&per_page=100&page=1'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(result).toEqual([
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/42',
+        managed_by_takt: true,
+        labels: [taktManagedLabel],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+    ]);
+  });
+
+  it('100件を超える open PR を後続ページまで取得する', () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      number: index + 1,
+      user: { login: `user-${index + 1}` },
+      base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+      head: { ref: `task/${index + 1}`, repo: { full_name: 'org/repo' } },
+      body: 'Human-managed body',
+      labels: [],
+      draft: false,
+      updated_at: `2026-04-20T12:${String(index % 60).padStart(2, '0')}:00Z`,
+    }));
+
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ nameWithOwner: 'org/repo' }))
+      .mockReturnValueOnce(withGhApiResponse(
+        firstPage,
+        '/repos/org/repo/pulls?state=open&per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGhApiResponse([
+        {
+          number: 101,
+          user: { login: 'nrslib' },
+          base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+          head: { ref: 'task/101', repo: { full_name: 'org/repo' } },
+          body: `## Summary\n\nTask summary\n\n## Execution Report\n\nTask completed successfully.\n\n${TAKT_MANAGED_PR_MARKER}`,
+          labels: [{ name: taktManagedLabel }],
+          draft: false,
+          updated_at: '2026-04-21T00:00:00Z',
+        },
+      ]));
+
+    const result = listOpenPrs('/project');
+
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      2,
+      'gh',
+      ['api', '--include', 'repos/org/repo/pulls?state=open&per_page=100&page=1'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      3,
+      'gh',
+      ['api', '--include', '/repos/org/repo/pulls?state=open&per_page=100&page=2'],
+      expect.objectContaining({ cwd: '/project', encoding: 'utf-8' }),
+    );
+    expect(result).toHaveLength(101);
+    expect(result[100]).toEqual({
+      number: 101,
+      author: 'nrslib',
+      base_branch: 'improve',
+      head_branch: 'task/101',
+      managed_by_takt: true,
+      labels: [taktManagedLabel],
+      same_repository: true,
+      draft: false,
+      updated_at: '2026-04-21T00:00:00Z',
+    });
+  });
+
+  it('fork PR は same_repository: false にマッピングする', () => {
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ nameWithOwner: 'org/repo' }))
+      .mockReturnValueOnce(withGhApiResponse([
+        {
+          number: 52,
+          user: { login: 'fork-user' },
+          base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+          head: { ref: 'takt/52/forked-branch', repo: { full_name: 'fork/repo' } },
+          body: 'Human-managed body',
+          labels: [{ name: taktManagedLabel }],
+          draft: false,
+          updated_at: '2026-04-21T01:00:00Z',
+        },
+      ]));
+
+    const result = listOpenPrs('/project');
+
+    expect(result).toEqual([
+      {
+        number: 52,
+        author: 'fork-user',
+        base_branch: 'improve',
+        head_branch: 'takt/52/forked-branch',
+        managed_by_takt: false,
+        labels: [taktManagedLabel],
+        same_repository: false,
+        draft: false,
+        updated_at: '2026-04-21T01:00:00Z',
+      },
+    ]);
+  });
+
+  it('gh CLI 利用不可時の判定を持たず、呼び出し失敗をそのまま伝播する', async () => {
+    const { checkGhCli } = await import('../infra/github/issue.js');
+    vi.mocked(checkGhCli).mockReturnValueOnce({ available: false, error: 'gh unavailable' });
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw new Error('gh unavailable');
+    });
+
+    expect(() => listOpenPrs('/project')).toThrow('gh unavailable');
+    expect(mockExecFileSync).toHaveBeenCalled();
+  });
+
+  it('pagination link が上限を超えて続く場合は明示エラーにする', () => {
+    let page = 1;
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ nameWithOwner: 'org/repo' }))
+      .mockImplementation(() => {
+        const response = withGhApiResponse(
+          [{
+            number: page,
+            user: { login: 'nrslib' },
+            base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+            head: { ref: `task/${page}`, repo: { full_name: 'org/repo' } },
+            body: 'Human-managed body',
+            labels: [],
+            draft: false,
+            updated_at: '2026-04-21T00:00:00Z',
+          }],
+          `/repos/org/repo/pulls?state=open&per_page=100&page=${page + 1}`,
+        );
+        page += 1;
+        return response;
+      });
+
+    expect(() => listOpenPrs('/project')).toThrow(
+      'Pagination limit exceeded while fetching open pull request list (>100 pages)',
+    );
+  });
+
+  it('marker 付き same-repo takt PR は label がなくても managed_by_takt: true にマッピングする', () => {
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ nameWithOwner: 'org/repo' }))
+      .mockReturnValueOnce(withGhApiResponse([
+        {
+          number: 78,
+          user: { login: 'nrslib' },
+          base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+          head: { ref: 'takt/78/managed-without-label', repo: { full_name: 'org/repo' } },
+          body: `## Summary\n\nTask summary\n\n## Execution Report\n\nTask completed successfully.\n\n${TAKT_MANAGED_PR_MARKER}`,
+          labels: [],
+          draft: false,
+          updated_at: '2026-04-21T02:30:00Z',
+        },
+      ]));
+
+    expect(listOpenPrs('/project')).toEqual([
+      expect.objectContaining({
+        number: 78,
+        managed_by_takt: true,
+        labels: [],
+        same_repository: true,
+      }),
+    ]);
+  });
+
+  it('legacy な TAKT PR 本文だけでは managed_by_takt: false にマッピングする', () => {
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ nameWithOwner: 'org/repo' }))
+      .mockReturnValueOnce(withGhApiResponse([
+        {
+          number: 77,
+          user: { login: 'nrslib' },
+          base: { ref: 'improve', repo: { full_name: 'org/repo' } },
+          head: { ref: 'takt/77/legacy-task', repo: { full_name: 'org/repo' } },
+          body: '## Summary\n\nTask summary\n\n## Execution Report\n\nWorkflow `default` completed successfully.',
+          labels: [],
+          draft: false,
+          updated_at: '2026-04-21T02:00:00Z',
+        },
+      ]));
+
+    expect(listOpenPrs('/project')).toEqual([
+      expect.objectContaining({
+        number: 77,
+        managed_by_takt: false,
+      }),
+    ]);
+  });
+});
+
 describe('createPullRequest', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExecFileSync.mockReset();
+    vi.mocked(checkGhCli).mockReset();
+    vi.mocked(checkGhCli).mockReturnValue({ available: true });
   });
 
   it('draft: true の場合、args に --draft が含まれる', () => {
@@ -68,7 +322,7 @@ describe('createPullRequest', () => {
       draft: true,
     }, '/project');
 
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'pr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).toContain('--draft');
   });
 
@@ -82,7 +336,7 @@ describe('createPullRequest', () => {
       draft: false,
     }, '/project');
 
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'pr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).not.toContain('--draft');
   });
 
@@ -95,14 +349,71 @@ describe('createPullRequest', () => {
       body: 'PR body',
     }, '/project');
 
-    const call = mockExecFileSync.mock.calls[0];
+    const call = mockExecFileSync.mock.calls.find((args) => (args[1] as string[])[0] === 'pr' && (args[1] as string[])[1] === 'create');
     expect(call[1]).not.toContain('--draft');
+  });
+
+  it('labels が指定された場合だけ --label をそのまま渡す', () => {
+    mockExecFileSync.mockReturnValue('https://github.com/org/repo/pull/4\n');
+
+    createPullRequest({
+      branch: 'feat/my-branch',
+      title: 'My PR',
+      body: 'PR body',
+      labels: ['release-blocker', 'automation'],
+    }, '/project');
+
+    const createCall = mockExecFileSync.mock.calls.find(
+      (args) => (args[1] as string[])[0] === 'pr' && (args[1] as string[])[1] === 'create',
+    );
+    expect(createCall?.[1]).toEqual(expect.arrayContaining([
+      '--label',
+      'release-blocker',
+      '--label',
+      'automation',
+    ]));
+  });
+
+  it('labels 未指定時は label 関連の副作用を追加しない', () => {
+    mockExecFileSync.mockReturnValue('https://github.com/org/repo/pull/4\n');
+
+    createPullRequest({
+      branch: 'feat/my-branch',
+      title: 'My PR',
+      body: 'PR body',
+    }, '/project');
+
+    const createCall = mockExecFileSync.mock.calls.find(
+      (args) => (args[1] as string[])[0] === 'pr' && (args[1] as string[])[1] === 'create',
+    );
+    expect(createCall?.[1]).not.toContain('--label');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('repo 指定時は PR 作成に同じ repo を使う', () => {
+    mockExecFileSync.mockReturnValue('https://github.com/target/repo/pull/4\n');
+
+    createPullRequest({
+      branch: 'feat/my-branch',
+      title: 'My PR',
+      body: 'PR body',
+      repo: 'target/repo',
+    }, '/project');
+
+    const createCall = mockExecFileSync.mock.calls.find(
+      (args) => (args[1] as string[])[0] === 'pr' && (args[1] as string[])[1] === 'create',
+    );
+    expect(createCall?.[1]).toContain('--repo');
+    expect(createCall?.[1]).toContain('target/repo');
   });
 });
 
 describe('mergePr', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExecFileSync.mockReset();
+    vi.mocked(checkGhCli).mockReset();
+    vi.mocked(checkGhCli).mockReturnValue({ available: true });
   });
 
   it('gh pr merge を --merge --delete-branch 付きで呼び出す', () => {
@@ -155,6 +466,7 @@ describe('buildPrBody', () => {
     expect(result).toContain('## Execution Report');
     expect(result).toContain('Workflow `default` completed.');
     expect(result).toContain('Closes #99');
+    expect(result).not.toContain(TAKT_MANAGED_PR_MARKER);
   });
 
   it('should use title when body is empty', () => {
@@ -170,6 +482,7 @@ describe('buildPrBody', () => {
 
     expect(result).toContain('Fix bug');
     expect(result).toContain('Closes #10');
+    expect(result).not.toContain(TAKT_MANAGED_PR_MARKER);
   });
 
   it('should build body without issue', () => {
@@ -179,6 +492,7 @@ describe('buildPrBody', () => {
     expect(result).toContain('## Execution Report');
     expect(result).toContain('Task completed.');
     expect(result).not.toContain('Closes');
+    expect(result).not.toContain(TAKT_MANAGED_PR_MARKER);
   });
 
   it('should support multiple issues', () => {
@@ -205,6 +519,7 @@ describe('buildPrBody', () => {
     expect(result).toContain('First issue body.');
     expect(result).toContain('Closes #1');
     expect(result).toContain('Closes #2');
+    expect(result).not.toContain(TAKT_MANAGED_PR_MARKER);
   });
 
 });
@@ -259,7 +574,7 @@ describe('fetchPrReviewComments', () => {
     );
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'gh',
-      ['api', '/repos/org/repo/pulls/456/comments?per_page=100&page=1'],
+      ['api', '--include', '/repos/org/repo/pulls/456/comments?per_page=100&page=1'],
       expect.objectContaining({ encoding: 'utf-8' }),
     );
     expect(result.number).toBe(456);
@@ -357,7 +672,7 @@ describe('fetchPrReviewComments', () => {
     // Then
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'gh',
-      ['api', '/repos/org/repo/pulls/12/comments?per_page=100&page=1'],
+      ['api', '--include', '/repos/org/repo/pulls/12/comments?per_page=100&page=1'],
       expect.objectContaining({ encoding: 'utf-8' }),
     );
     expect(result.reviews).toHaveLength(31);
@@ -398,8 +713,11 @@ describe('fetchPrReviewComments', () => {
     ];
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(ghResponse))
-      .mockReturnValueOnce(JSON.stringify(firstPageInlineComments))
-      .mockReturnValueOnce(JSON.stringify(secondPageInlineComments));
+      .mockReturnValueOnce(withGhApiResponse(
+        firstPageInlineComments,
+        '/repos/org/repo/pulls/13/comments?per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGhApiResponse(secondPageInlineComments));
 
     // When
     const result = fetchPrReviewComments(13, '/project');
@@ -407,12 +725,12 @@ describe('fetchPrReviewComments', () => {
     // Then
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'gh',
-      ['api', '/repos/org/repo/pulls/13/comments?per_page=100&page=1'],
+      ['api', '--include', '/repos/org/repo/pulls/13/comments?per_page=100&page=1'],
       expect.objectContaining({ encoding: 'utf-8' }),
     );
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'gh',
-      ['api', '/repos/org/repo/pulls/13/comments?per_page=100&page=2'],
+      ['api', '--include', '/repos/org/repo/pulls/13/comments?per_page=100&page=2'],
       expect.objectContaining({ encoding: 'utf-8' }),
     );
     expect(result.reviews).toHaveLength(101);
@@ -463,39 +781,45 @@ describe('fetchPrReviewComments', () => {
     ]);
   });
 
-  it('should return collected comments when MAX_PAGES limit is reached', () => {
+  it('should request one more page when inline comments fill the page exactly and stop on empty page', () => {
     // Given
     const ghResponse = {
       number: 15,
-      title: 'Max pages hit',
+      title: 'Exact page boundary',
       body: '',
       url: 'https://github.com/org/repo/pull/15',
-      headRefName: 'fix/max-pages',
+      headRefName: 'fix/page-boundary',
       comments: [],
       reviews: [],
       files: [],
     };
-    // Every page returns exactly per_page (100) items, simulating a never-ending API
     const fullPage = Array.from({ length: 100 }, (_, i) => ({
       body: `Comment ${i + 1}`,
       path: 'src/index.ts',
       line: i + 1,
-      user: { login: 'reviewer-max-pages' },
+      user: { login: 'reviewer-page-boundary' },
     }));
 
-    mockExecFileSync.mockReturnValueOnce(JSON.stringify(ghResponse));
-    // Return full pages for all 100 pages
-    for (let i = 0; i < 100; i++) {
-      mockExecFileSync.mockReturnValueOnce(JSON.stringify(fullPage));
-    }
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify(ghResponse))
+      .mockReturnValueOnce(withGhApiResponse(
+        fullPage,
+        '/repos/org/repo/pulls/15/comments?per_page=100&page=2',
+      ))
+      .mockReturnValueOnce(withGhApiResponse([]));
 
     // When
     const result = fetchPrReviewComments(15, '/project');
 
-    // Then — should have called gh api exactly 101 times (1 for pr view + 100 pages)
-    expect(mockExecFileSync).toHaveBeenCalledTimes(101);
-    // Should have collected 100 pages × 100 comments = 10000 comments
-    expect(result.reviews).toHaveLength(10000);
+    // Then
+    expect(mockExecFileSync).toHaveBeenCalledTimes(3);
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      3,
+      'gh',
+      ['api', '--include', '/repos/org/repo/pulls/15/comments?per_page=100&page=2'],
+      expect.objectContaining({ encoding: 'utf-8' }),
+    );
+    expect(result.reviews).toHaveLength(100);
   });
 
   it('should pass cwd to all execFileSync calls', () => {

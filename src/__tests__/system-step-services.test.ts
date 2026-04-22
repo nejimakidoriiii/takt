@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { WorkflowState } from '../core/models/index.js';
 
 const {
   mockGetCurrentBranch,
@@ -6,6 +7,7 @@ const {
   mockAgentCall,
   mockFetchIssue,
   mockFetchPrReviewComments,
+  mockListOpenPrs,
   mockFindExistingPr,
   mockCommentOnPr,
   mockMergePr,
@@ -19,6 +21,7 @@ const {
   mockAgentCall: vi.fn(),
   mockFetchIssue: vi.fn(),
   mockFetchPrReviewComments: vi.fn(),
+  mockListOpenPrs: vi.fn(),
   mockFindExistingPr: vi.fn(),
   mockCommentOnPr: vi.fn(),
   mockMergePr: vi.fn(),
@@ -66,6 +69,7 @@ vi.mock('../infra/git/index.js', () => ({
     checkCliStatus: vi.fn(() => ({ available: true })),
     fetchIssue: (...args: unknown[]) => mockFetchIssue(...args),
     fetchPrReviewComments: (...args: unknown[]) => mockFetchPrReviewComments(...args),
+    listOpenPrs: (...args: unknown[]) => mockListOpenPrs(...args),
     findExistingPr: (...args: unknown[]) => mockFindExistingPr(...args),
     commentOnPr: (...args: unknown[]) => mockCommentOnPr(...args),
     mergePr: (...args: unknown[]) => mockMergePr(...args),
@@ -92,6 +96,7 @@ vi.mock('../features/interactive/assistantConfig.js', () => ({
 }));
 
 import { DefaultSystemStepServices } from '../infra/workflow/system/DefaultSystemStepServices.js';
+import { getGitProvider } from '../infra/git/index.js';
 
 function createCommandError(message: string, stderr?: string): Error {
   const error = new Error(message);
@@ -101,11 +106,28 @@ function createCommandError(message: string, stderr?: string): Error {
   return error;
 }
 
+function createWorkflowState(currentStep = 'route_context'): WorkflowState {
+  return {
+    workflowName: 'auto-improvement-loop',
+    currentStep,
+    iteration: 1,
+    stepOutputs: new Map(),
+    structuredOutputs: new Map(),
+    systemContexts: new Map(),
+    effectResults: new Map(),
+    userInputs: [],
+    personaSessions: new Map(),
+    stepIterations: new Map(),
+    status: 'running',
+  };
+}
+
 describe('DefaultSystemStepServices', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetCurrentBranch.mockReturnValue('task/test-branch');
     mockFindExistingPr.mockReturnValue(undefined);
+    mockListOpenPrs.mockReturnValue([]);
     mockAgentCall.mockResolvedValue({
       status: 'done',
       content: 'resolved',
@@ -210,6 +232,722 @@ describe('DefaultSystemStepServices', () => {
     expect(mockFetchPrReviewComments).not.toHaveBeenCalled();
   });
 
+  it('resolves pr_list with where filters and updated_at desc ordering', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 41,
+        author: 'someone-else',
+        base_branch: 'improve',
+        head_branch: 'task/41',
+        managed_by_takt: false,
+        labels: ['automation'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T11:00:00Z',
+      },
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/42',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/43',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T14:00:00Z',
+      },
+      {
+        number: 40,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/40',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: true,
+        updated_at: '2026-04-20T13:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR list',
+    });
+
+    const result = services.resolveSystemInput({
+      type: 'pr_list',
+      source: 'current_project',
+      as: 'prs',
+      where: {
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/*',
+        draft: false,
+      },
+    });
+
+    expect(mockListOpenPrs).toHaveBeenCalledWith('/repo');
+    expect(result).toEqual([
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/43',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'task/42',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    ]);
+  });
+
+  it('resolves pr_list with auto-improvement-loop filters and excludes unlabeled same-repo takt PRs', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 41,
+        author: 'human-reviewer',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-human-spoof',
+        managed_by_takt: false,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T15:00:00Z',
+      },
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T14:00:00Z',
+      },
+      {
+        number: 44,
+        author: 'fork-user',
+        base_branch: 'improve',
+        head_branch: 'takt/654/spoofed-fork',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: false,
+        draft: false,
+        updated_at: '2026-04-20T16:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR list',
+    });
+
+    const result = services.resolveSystemInput({
+      type: 'pr_list',
+      source: 'current_project',
+      as: 'prs',
+      where: {
+        head_branch: 'takt/*',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    });
+
+    expect(result).toEqual([
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    ]);
+  });
+
+  it('resolves pr_list with explicit labels filter and excludes unlabeled TAKT PRs', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-fix-pr-loop-selection',
+        managed_by_takt: false,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T14:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect labeled PR list',
+    });
+
+    const result = services.resolveSystemInput({
+      type: 'pr_list',
+      source: 'current_project',
+      as: 'prs',
+      where: {
+        head_branch: 'takt/*',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    });
+
+    expect(result).toEqual([
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    ]);
+  });
+
+  it('resolves pr_list with managed_by_takt filter and excludes same-repo human takt PRs', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 45,
+        author: 'human-reviewer',
+        base_branch: 'improve',
+        head_branch: 'takt/45/manual-spoof',
+        managed_by_takt: false,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T17:00:00Z',
+      },
+      {
+        number: 46,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/46/managed-task',
+        managed_by_takt: true,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T18:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect TAKT provenance filter',
+    });
+
+    expect(services.resolveSystemInput({
+      type: 'pr_list',
+      source: 'current_project',
+      as: 'prs',
+      where: {
+        head_branch: 'takt/*',
+        managed_by_takt: true,
+        same_repository: true,
+        draft: false,
+      },
+    })).toEqual([
+      {
+        number: 46,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/46/managed-task',
+        managed_by_takt: true,
+        labels: [],
+        same_repository: true,
+        draft: false,
+      },
+    ]);
+  });
+
+  it('resolves pr_selection by rotating after the previously selected takt PR', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 41,
+        author: 'human-reviewer',
+        base_branch: 'improve',
+        head_branch: 'feature/manual-fix',
+        managed_by_takt: false,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T15:00:00Z',
+      },
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T14:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR selection',
+    });
+    const state = createWorkflowState();
+    state.systemContexts.set('route_context', {
+      selected_pr: {
+        exists: true,
+        number: 43,
+      },
+    });
+
+    const resolveSystemInput = services.resolveSystemInput as unknown as (
+      input: {
+        type: 'pr_selection';
+        source: 'current_project';
+        as: 'selected_pr';
+        where: {
+          head_branch: string;
+          managed_by_takt: boolean;
+          labels: string[];
+          same_repository: boolean;
+          draft: boolean;
+        };
+      },
+      workflowState: WorkflowState,
+      stepName: string,
+    ) => unknown;
+
+    const result = resolveSystemInput({
+      type: 'pr_selection',
+      source: 'current_project',
+      as: 'selected_pr',
+      where: {
+        head_branch: 'takt/*',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    }, state, 'route_context');
+
+    expect(result).toEqual({
+      exists: true,
+      number: 42,
+      author: 'nrslib',
+      base_branch: 'improve',
+      head_branch: 'takt/20260420-fix-pr-loop-selection',
+      managed_by_takt: true,
+      labels: ['takt-managed'],
+      same_repository: true,
+      draft: false,
+    });
+  });
+
+  it('resolves pr_selection from the newest candidate when the previous takt PR is no longer present', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T14:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR selection fallback',
+    });
+    const state = createWorkflowState();
+    state.systemContexts.set('route_context', {
+      selected_pr: {
+        exists: true,
+        number: 999,
+      },
+    });
+
+    const resolveSystemInput = services.resolveSystemInput as unknown as (
+      input: {
+        type: 'pr_selection';
+        source: 'current_project';
+        as: 'selected_pr';
+        where: {
+          head_branch: string;
+          managed_by_takt: boolean;
+          labels: string[];
+          same_repository: boolean;
+          draft: boolean;
+        };
+      },
+      workflowState: WorkflowState,
+      stepName: string,
+    ) => unknown;
+
+    const result = resolveSystemInput({
+      type: 'pr_selection',
+      source: 'current_project',
+      as: 'selected_pr',
+      where: {
+        head_branch: 'takt/*',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    }, state, 'route_context');
+
+    expect(result).toEqual({
+      exists: true,
+      number: 43,
+      author: 'nrslib',
+      base_branch: 'improve',
+      head_branch: 'takt/654/fix-pr-loop-selection',
+      managed_by_takt: true,
+      labels: ['takt-managed'],
+      same_repository: true,
+      draft: false,
+    });
+  });
+
+  it('resolves pr_selection using the configured alias when reading the previous selection', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+      {
+        number: 43,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/654/fix-pr-loop-selection',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T14:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR selection alias',
+    });
+    const state = createWorkflowState();
+    state.systemContexts.set('route_context', {
+      current_pr: {
+        exists: true,
+        number: 43,
+      },
+    });
+
+    const resolveSystemInput = services.resolveSystemInput as unknown as (
+      input: {
+        type: 'pr_selection';
+        source: 'current_project';
+        as: 'current_pr';
+        where: {
+          head_branch: string;
+          managed_by_takt: boolean;
+          labels: string[];
+          same_repository: boolean;
+          draft: boolean;
+        };
+      },
+      workflowState: WorkflowState,
+      stepName: string,
+    ) => unknown;
+
+    const result = resolveSystemInput({
+      type: 'pr_selection',
+      source: 'current_project',
+      as: 'current_pr',
+      where: {
+        head_branch: 'takt/*',
+        managed_by_takt: true,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+      },
+    }, state, 'route_context');
+
+    expect(result).toEqual({
+      exists: true,
+      number: 42,
+      author: 'nrslib',
+      base_branch: 'improve',
+      head_branch: 'takt/20260420-fix-pr-loop-selection',
+      managed_by_takt: true,
+      labels: ['takt-managed'],
+      same_repository: true,
+      draft: false,
+    });
+  });
+
+  it('reuses the same PR candidate snapshot when pr_list and pr_selection use semantically identical where filters', () => {
+    mockListOpenPrs
+      .mockReturnValueOnce([
+        {
+          number: 43,
+          author: 'nrslib',
+          base_branch: 'improve',
+          head_branch: 'takt/654/fix-pr-loop-selection',
+          managed_by_takt: true,
+          labels: ['takt-managed'],
+          same_repository: true,
+          draft: false,
+          updated_at: '2026-04-20T14:00:00Z',
+        },
+        {
+          number: 42,
+          author: 'nrslib',
+          base_branch: 'improve',
+          head_branch: 'takt/20260420-fix-pr-loop-selection',
+          managed_by_takt: true,
+          labels: ['takt-managed'],
+          same_repository: true,
+          draft: false,
+          updated_at: '2026-04-20T12:00:00Z',
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          number: 99,
+          author: 'another-user',
+          base_branch: 'improve',
+          head_branch: 'takt/999/unexpected-second-fetch',
+          managed_by_takt: false,
+          labels: [],
+          same_repository: true,
+          draft: false,
+          updated_at: '2026-04-20T16:00:00Z',
+        },
+      ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR snapshot consistency',
+    });
+    const state = createWorkflowState();
+    state.systemContexts.set('route_context', {
+      selected_pr: {
+        exists: true,
+        number: 43,
+      },
+    });
+    const resolutionContext = { cache: new Map<string, unknown>() };
+    const prListWhere = {
+      head_branch: 'takt/*',
+      managed_by_takt: true,
+      labels: ['takt-managed'],
+      same_repository: true,
+      draft: false,
+    };
+    const prSelectionWhere = {
+      draft: false,
+      managed_by_takt: true,
+      labels: ['takt-managed', 'takt-managed'],
+      same_repository: true,
+      head_branch: 'takt/*',
+    };
+
+    const prs = services.resolveSystemInput(
+      { type: 'pr_list', source: 'current_project', as: 'prs', where: prListWhere },
+      state,
+      'route_context',
+      resolutionContext,
+    ) as Array<{ number: number }>;
+    const selectedPr = services.resolveSystemInput(
+      { type: 'pr_selection', source: 'current_project', as: 'selected_pr', where: prSelectionWhere },
+      state,
+      'route_context',
+      resolutionContext,
+    ) as { exists: boolean; number: number };
+
+    expect(mockListOpenPrs).toHaveBeenCalledTimes(1);
+    expect(prs.map((pr) => pr.number)).toEqual([43, 42]);
+    expect(selectedPr.exists).toBe(true);
+    expect(selectedPr.number).toBe(42);
+    expect(prs.some((pr) => pr.number === selectedPr.number)).toBe(true);
+  });
+
+  it('resolves pr_selection with explicit labels filter and returns exists: false for unlabeled TAKT PRs', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 42,
+        author: 'nrslib',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-fix-pr-loop-selection',
+        managed_by_takt: false,
+        labels: [],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect labeled PR selection',
+    });
+    const state = createWorkflowState();
+
+    const result = services.resolveSystemInput(
+      {
+        type: 'pr_selection',
+        source: 'current_project',
+        as: 'selected_pr',
+        where: {
+          head_branch: 'takt/*',
+          managed_by_takt: true,
+          labels: ['takt-managed'],
+          same_repository: true,
+          draft: false,
+        },
+      },
+      state,
+      'route_context',
+    );
+
+    expect(result).toEqual({ exists: false });
+  });
+
+  it('resolves pr_selection with explicit labels filter and returns exists: false for label-only manual takt PRs', () => {
+    mockListOpenPrs.mockReturnValue([
+      {
+        number: 42,
+        author: 'human-reviewer',
+        base_branch: 'improve',
+        head_branch: 'takt/20260420-manual-pr',
+        managed_by_takt: false,
+        labels: ['takt-managed'],
+        same_repository: true,
+        draft: false,
+        updated_at: '2026-04-20T12:00:00Z',
+      },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect manual labeled PR selection',
+    });
+    const state = createWorkflowState();
+
+    const result = services.resolveSystemInput(
+      {
+        type: 'pr_selection',
+        source: 'current_project',
+        as: 'selected_pr',
+        where: {
+          head_branch: 'takt/*',
+          managed_by_takt: true,
+          labels: ['takt-managed'],
+          same_repository: true,
+          draft: false,
+        },
+      },
+      state,
+      'route_context',
+    );
+
+    expect(result).toEqual({ exists: false });
+  });
+
   it('resolves branch_context from the current branch', () => {
     const services = new DefaultSystemStepServices({
       cwd: '/repo/worktree',
@@ -251,7 +989,153 @@ describe('DefaultSystemStepServices', () => {
       failed_count: 1,
       exceeded_count: 1,
       pr_failed_count: 1,
+      items: [
+        { task_name: undefined, kind: 'running', issue: undefined, pr: undefined },
+        { task_name: undefined, kind: 'running', issue: undefined, pr: undefined },
+        { task_name: undefined, kind: 'pending', issue: undefined, pr: undefined },
+        { task_name: undefined, kind: 'completed', issue: undefined, pr: undefined },
+        { task_name: undefined, kind: 'failed', issue: undefined, pr: undefined },
+        { task_name: undefined, kind: 'exceeded', issue: undefined, pr: undefined },
+        { task_name: undefined, kind: 'pr_failed', issue: undefined, pr: undefined },
+      ],
     });
+  });
+
+  it('task_queue_context に items 配列を含める', () => {
+    mockTaskRunnerListAllTaskItems.mockReturnValue([
+      { name: 'task-1', kind: 'running', issueNumber: 586, prNumber: 42 },
+      { name: 'task-2', kind: 'pending' },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect queue',
+    });
+
+    const result = services.resolveSystemInput({ type: 'task_queue_context', source: 'current_project', as: 'queue' });
+
+    expect(result).toEqual(expect.objectContaining({
+      exists: true,
+      total_count: 2,
+      pending_count: 1,
+      running_count: 1,
+      completed_count: 0,
+      failed_count: 0,
+      exceeded_count: 0,
+      pr_failed_count: 0,
+      items: [
+        { task_name: 'task-1', kind: 'running', issue: 586, pr: 42 },
+        { task_name: 'task-2', kind: 'pending', issue: undefined, pr: undefined },
+      ],
+    }));
+  });
+
+  it('task_queue_context は items と count 系で同じ queue 集合を返す', () => {
+    mockTaskRunnerListAllTaskItems.mockReturnValue([
+      { name: 'orchestration-loop', kind: 'running', issueNumber: 586, prNumber: 42 },
+      { name: 'task-2', kind: 'pending' },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect queue',
+    });
+
+    const result = services.resolveSystemInput({ type: 'task_queue_context', source: 'current_project', as: 'queue' });
+
+    expect(result).toEqual({
+      exists: true,
+      total_count: 2,
+      pending_count: 1,
+      running_count: 1,
+      completed_count: 0,
+      failed_count: 0,
+      exceeded_count: 0,
+      pr_failed_count: 0,
+      items: [
+        { task_name: 'orchestration-loop', kind: 'running', issue: 586, pr: 42 },
+        { task_name: 'task-2', kind: 'pending', issue: undefined, pr: undefined },
+      ],
+    });
+  });
+
+  it('task_queue_context で exclude_current_task を指定すると current task を除外した queue を返す', () => {
+    mockTaskRunnerListAllTaskItems.mockReturnValue([
+      { name: 'orchestration-loop', runSlug: 'run-self', kind: 'running', issueNumber: 586, prNumber: 42 },
+      { name: 'task-2', runSlug: 'run-other', kind: 'running', issueNumber: 587, prNumber: 43 },
+      { name: 'task-3', kind: 'pending' },
+    ]);
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect queue',
+      taskContext: { runSlug: 'run-self' },
+    });
+
+    const result = services.resolveSystemInput({
+      type: 'task_queue_context',
+      source: 'current_project',
+      as: 'queue',
+      exclude_current_task: true,
+    });
+
+    expect(result).toEqual({
+      exists: true,
+      total_count: 2,
+      pending_count: 1,
+      running_count: 1,
+      completed_count: 0,
+      failed_count: 0,
+      exceeded_count: 0,
+      pr_failed_count: 0,
+      items: [
+        { task_name: 'task-2', kind: 'running', issue: 587, pr: 43 },
+        { task_name: 'task-3', kind: 'pending', issue: undefined, pr: undefined },
+      ],
+    });
+  });
+
+  it('task_queue_context で exclude_current_task を指定した場合、run slug がなければ失敗する', () => {
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect queue',
+    });
+
+    expect(() => services.resolveSystemInput({
+      type: 'task_queue_context',
+      source: 'current_project',
+      as: 'queue',
+      exclude_current_task: true,
+    })).toThrow('task_queue_context.exclude_current_task requires current task run slug');
+  });
+
+  it('pr_list は CLI が利用不可なら listOpenPrs を呼ばずに失敗する', () => {
+    vi.mocked(getGitProvider).mockReturnValueOnce({
+      checkCliStatus: vi.fn(() => ({ available: false, error: 'gh unavailable' })),
+      fetchIssue: (...args: unknown[]) => mockFetchIssue(...args),
+      fetchPrReviewComments: (...args: unknown[]) => mockFetchPrReviewComments(...args),
+      listOpenPrs: (...args: unknown[]) => mockListOpenPrs(...args),
+      findExistingPr: (...args: unknown[]) => mockFindExistingPr(...args),
+      commentOnPr: (...args: unknown[]) => mockCommentOnPr(...args),
+      mergePr: (...args: unknown[]) => mockMergePr(...args),
+    });
+
+    const services = new DefaultSystemStepServices({
+      cwd: '/repo/worktree',
+      projectCwd: '/repo',
+      task: 'Inspect PR list',
+    });
+
+    expect(() => services.resolveSystemInput({
+      type: 'pr_list',
+      source: 'current_project',
+      as: 'prs',
+    })).toThrow('gh unavailable');
+    expect(mockListOpenPrs).not.toHaveBeenCalled();
   });
 
   it('creates a new follow-up task and forwards worktree options', async () => {

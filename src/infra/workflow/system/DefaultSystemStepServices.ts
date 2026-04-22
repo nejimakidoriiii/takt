@@ -5,6 +5,7 @@ import type {
   WorkflowSystemInput,
 } from '../../../core/models/types.js';
 import type {
+  SystemStepInputResolutionContext,
   SystemStepServices,
   SystemStepServicesOptions,
 } from '../../../core/workflow/system/system-step-services.js';
@@ -21,11 +22,66 @@ import {
 } from './system-pr-effects.js';
 import { enqueueTaskEffect } from './system-enqueue-effect.js';
 import { resolveConflictsWithAiEffect, syncWithRootEffect } from './system-sync-effects.js';
+import { resolvePrListInput, resolvePrSelectionInput } from './system-pr-input-resolver.js';
+
+function listQueueTasks(projectCwd: string) {
+  return new TaskRunner(projectCwd).listAllTaskItems();
+}
+
+function buildTaskQueueContext(tasks: ReturnType<typeof listQueueTasks>) {
+  const counts = {
+    pending_count: 0,
+    running_count: 0,
+    completed_count: 0,
+    failed_count: 0,
+    exceeded_count: 0,
+    pr_failed_count: 0,
+  };
+
+  for (const task of tasks) {
+    const key = `${task.kind}_count` as keyof typeof counts;
+    if (key in counts) {
+      counts[key] += 1;
+    }
+  }
+
+  return {
+    exists: tasks.length > 0,
+    total_count: tasks.length,
+    ...counts,
+    items: tasks.map((task) => ({
+      task_name: task.name,
+      kind: task.kind,
+      issue: task.issueNumber,
+      pr: task.prNumber,
+    })),
+  };
+}
+
+function resolveTaskQueueInput(
+  input: Extract<WorkflowSystemInput, { type: 'task_queue_context' }>,
+  options: SystemStepServicesOptions,
+) {
+  const tasks = listQueueTasks(options.projectCwd);
+  if (input.exclude_current_task !== true) {
+    return buildTaskQueueContext(tasks);
+  }
+
+  const runSlug = options.taskContext?.runSlug;
+  if (!runSlug) {
+    throw new Error('task_queue_context.exclude_current_task requires current task run slug');
+  }
+
+  return buildTaskQueueContext(tasks.filter((task) => task.runSlug !== runSlug));
+}
 
 function resolveInput(
   options: SystemStepServicesOptions,
   input: WorkflowSystemInput,
-): Record<string, unknown> {
+  state?: WorkflowState,
+  stepName?: string,
+  resolutionContext?: SystemStepInputResolutionContext,
+): unknown {
   switch (input.type) {
     case 'task_context':
       return options.task.length > 0
@@ -77,27 +133,12 @@ function resolveInput(
       };
     }
     case 'task_queue_context': {
-      const tasks = new TaskRunner(options.projectCwd).listAllTaskItems();
-      const counts = {
-        pending_count: 0,
-        running_count: 0,
-        completed_count: 0,
-        failed_count: 0,
-        exceeded_count: 0,
-        pr_failed_count: 0,
-      };
-      for (const task of tasks) {
-        const key = `${task.kind}_count` as keyof typeof counts;
-        if (key in counts) {
-          counts[key] += 1;
-        }
-      }
-      return {
-        exists: tasks.length > 0,
-        total_count: tasks.length,
-        ...counts,
-      };
+      return resolveTaskQueueInput(input, options);
     }
+    case 'pr_list':
+      return resolvePrListInput(input, options.projectCwd, resolutionContext);
+    case 'pr_selection':
+      return resolvePrSelectionInput(input, options.projectCwd, state, stepName, resolutionContext);
   }
 }
 
@@ -123,18 +164,23 @@ async function runEffect(
 export class DefaultSystemStepServices implements SystemStepServices {
   constructor(private readonly options: SystemStepServicesOptions) {}
 
-  resolveSystemInput(input: WorkflowSystemInput): Record<string, unknown> {
-    return resolveInput(this.options, input);
-  }
+  resolveSystemInput = (
+    input: WorkflowSystemInput,
+    state?: WorkflowState,
+    stepName?: string,
+    resolutionContext?: SystemStepInputResolutionContext,
+  ): unknown => {
+    return resolveInput(this.options, input, state, stepName, resolutionContext);
+  };
 
-  async executeEffect(
+  executeEffect = async (
     effect: WorkflowEffect,
     payload: Record<string, unknown>,
     _state: WorkflowState,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<Record<string, unknown>> => {
     validateSystemEffectPayload(effect, payload);
     return runEffect(this.options, effect, payload);
-  }
+  };
 }
 
 export function createDefaultSystemStepServices(
