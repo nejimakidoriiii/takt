@@ -23,14 +23,19 @@ function createStep(fileName: string): WorkflowStep {
   };
 }
 
-function createContext(reportDir: string, lastResponse = 'Phase 1 result'): PhaseRunnerContext {
-  let currentSessionId = 'session-resume-1';
+function createContext(
+  reportDir: string,
+  lastResponse?: string,
+  initialSessionId?: string,
+): PhaseRunnerContext {
+  const currentLastResponse = arguments.length >= 2 ? lastResponse : 'Phase 1 result';
+  let currentSessionId = arguments.length >= 3 ? initialSessionId : 'session-resume-1';
 
   return {
     cwd: reportDir,
     reportDir,
     language: 'en',
-    lastResponse,
+    lastResponse: currentLastResponse,
     getSessionId: (_persona: string) => currentSessionId,
     buildResumeOptions: (_step, sessionId, overrides) => ({
       cwd: reportDir,
@@ -117,6 +122,35 @@ describe('runReportPhase retry with new session', () => {
     expect(secondInstruction).toContain('Implemented feature X');
   });
 
+  it('should start report phase with a new session when no existing session is available', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('01-team-leader.md');
+    const ctx = createContext(reportDir, 'Aggregated team leader output', undefined);
+    queueRunAgentResponses([{
+      persona: 'coder',
+      status: 'done',
+      content: '# Report\nFresh session output',
+      timestamp: new Date('2026-02-11T00:00:30Z'),
+      sessionId: 'session-fresh-1',
+    }]);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When
+    await runReportPhase(step, 1, ctx);
+
+    // Then
+    const reportPath = join(reportDir, '01-team-leader.md');
+    expect(readFileSync(reportPath, 'utf-8')).toBe('# Report\nFresh session output');
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+
+    const firstCallInstruction = runAgentMock.mock.calls[0]?.[1] as string;
+    const firstCallOptions = runAgentMock.mock.calls[0]?.[2] as { sessionId?: string };
+    expect(firstCallOptions.sessionId).toBeUndefined();
+    expect(firstCallInstruction).toContain('## Previous Work Context');
+    expect(firstCallInstruction).toContain('Aggregated team leader output');
+  });
+
   it('should retry with new session when first attempt status is error', async () => {
     // Given
     const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
@@ -174,6 +208,102 @@ describe('runReportPhase retry with new session', () => {
     expect(runAgentMock).toHaveBeenCalledTimes(2);
   });
 
+  it('should fail immediately without retry when resumed session errors and lastResponse is unavailable', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('04-qa.md');
+    const ctx = createContext(reportDir, undefined, 'session-resume-1');
+    queueRunAgentResponses([{
+      persona: 'coder',
+      status: 'error',
+      content: 'Tool use is not allowed in this phase',
+      timestamp: new Date('2026-02-11T00:02:30Z'),
+      error: 'Tool use is not allowed in this phase',
+    }]);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When / Then
+    await expect(runReportPhase(step, 1, ctx)).rejects.toThrow(
+      'Report phase failed for 04-qa.md: Tool use is not allowed in this phase',
+    );
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should fail immediately without retry when resumed session returns empty output and lastResponse is unavailable', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('04-qa.md');
+    const ctx = createContext(reportDir, undefined, 'session-resume-1');
+    queueRunAgentResponses([{
+      persona: 'coder',
+      status: 'done',
+      content: '   ',
+      timestamp: new Date('2026-02-11T00:02:35Z'),
+    }]);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When / Then
+    await expect(runReportPhase(step, 1, ctx)).rejects.toThrow(
+      'Report phase failed for 04-qa.md: Report output is empty',
+    );
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should throw when no existing session and no lastResponse are available', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('04-qa.md');
+    const ctx = createContext(reportDir, undefined, undefined);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When / Then
+    await expect(runReportPhase(step, 1, ctx)).rejects.toThrow(
+      'Report phase requires a session to resume, but no sessionId found for persona "coder" in step "implement"',
+    );
+    expect(runAgentMock).not.toHaveBeenCalled();
+  });
+
+  it('should fail immediately without retry when new-session first attempt returns empty output', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('04-qa.md');
+    const ctx = createContext(reportDir, 'Aggregated team leader output', undefined);
+    queueRunAgentResponses([{
+      persona: 'coder',
+      status: 'done',
+      content: '   ',
+      timestamp: new Date('2026-02-11T00:02:45Z'),
+    }]);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When / Then
+    await expect(runReportPhase(step, 1, ctx)).rejects.toThrow(
+      'Report phase failed for 04-qa.md: Report output is empty',
+    );
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should fail immediately without retry when new-session first attempt status is error', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step = createStep('04-qa.md');
+    const ctx = createContext(reportDir, 'Aggregated team leader output', undefined);
+    queueRunAgentResponses([{
+      persona: 'coder',
+      status: 'error',
+      content: 'Tool use is not allowed in this phase',
+      timestamp: new Date('2026-02-11T00:02:50Z'),
+      error: 'Tool use is not allowed in this phase',
+    }]);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When / Then
+    await expect(runReportPhase(step, 1, ctx)).rejects.toThrow(
+      'Report phase failed for 04-qa.md: Tool use is not allowed in this phase',
+    );
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+  });
+
   it('should not retry when first attempt succeeds', async () => {
     // Given
     const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
@@ -195,6 +325,54 @@ describe('runReportPhase retry with new session', () => {
     expect(runAgentMock).toHaveBeenCalledTimes(1);
     const reportPath = join(reportDir, '05-ok.md');
     expect(readFileSync(reportPath, 'utf-8')).toBe('Single-pass success');
+  });
+
+  it('should resume the next report file with the session returned by the first new-session report', async () => {
+    // Given
+    const reportDir = join(tmpRoot, '.takt', 'runs', 'sample-run', 'reports');
+    const step: WorkflowStep = {
+      name: 'implement',
+      persona: 'coder',
+      personaDisplayName: 'Coder',
+      instruction: 'Implement task',
+      passPreviousResponse: false,
+      outputContracts: [{ name: 'first.md' }, { name: 'second.md' }],
+    };
+    const resumedSessionIds: string[] = [];
+    const ctx = createContext(reportDir, 'Aggregated output from team leader', undefined);
+    const originalBuildResumeOptions = ctx.buildResumeOptions;
+    ctx.buildResumeOptions = (currentStep, sessionId, overrides) => {
+      resumedSessionIds.push(sessionId);
+      return originalBuildResumeOptions(currentStep, sessionId, overrides);
+    };
+    queueRunAgentResponses([
+      {
+        persona: 'coder',
+        status: 'done',
+        content: 'first report',
+        timestamp: new Date('2026-02-11T00:03:30Z'),
+        sessionId: 'session-fresh-1',
+      },
+      {
+        persona: 'coder',
+        status: 'done',
+        content: 'second report',
+        timestamp: new Date('2026-02-11T00:03:31Z'),
+        sessionId: 'session-fresh-2',
+      },
+    ]);
+    const runAgentMock = vi.mocked(runAgent);
+
+    // When
+    await runReportPhase(step, 1, ctx);
+
+    // Then
+    expect(resumedSessionIds).toEqual(['session-fresh-1']);
+    expect(readFileSync(join(reportDir, 'first.md'), 'utf-8')).toBe('first report');
+    expect(readFileSync(join(reportDir, 'second.md'), 'utf-8')).toBe('second report');
+
+    const secondCallOptions = runAgentMock.mock.calls[1]?.[2] as { sessionId?: string };
+    expect(secondCallOptions.sessionId).toBe('session-fresh-1');
   });
 
   it('should return blocked result without retry', async () => {
