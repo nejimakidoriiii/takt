@@ -31,7 +31,6 @@ export type {
   StreamResultEventData,
   StreamErrorEventData,
 } from '../../shared/types/provider.js';
-
 export interface PermissionRequest {
   toolName: string;
   input: Record<string, unknown>;
@@ -88,6 +87,7 @@ export interface StepProviderInfo {
 
 export interface TeamLeaderPartRuntimeResolution {
   partAllowedTools?: string[];
+  processSafety?: { protectedParentRunPid: number };
 }
 
 export interface RuntimeStepResolution {
@@ -278,6 +278,7 @@ export interface WorkflowEngineOptions {
     issueNumber?: number;
     runSlug?: string;
   };
+  phase1ProcessSafetyByStep?: Record<string, { protectedParentRunPid: number }>;
   systemStepServicesFactory?: SystemStepServicesFactory;
   sharedRuntime?: WorkflowSharedRuntimeState;
   resumeStackPrefix?: WorkflowResumePointEntry[];
