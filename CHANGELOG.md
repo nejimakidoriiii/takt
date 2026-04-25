@@ -10,8 +10,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `auto-improvement-loop` builtin workflow added (#653). An infinite-loop orchestration workflow that scans the repository on a schedule and routes work by priority (PR -> Issue -> fresh improvement -> wait -> route). Supporting infrastructure introduced together: `max_steps: infinite` (no step cap, no `exceeded` status), `pr_list` system input (open PRs filtered by `author` / `base_branch` / `head_branch` / `draft`), `task_queue_context.items` (queue contents observable from `when:`), `when:` array references with `exists(list, item.field == "X")` function (initial scope: `==` and `&&` only), and `followup-task` builtin structured-output schema with `enqueue_new_task` / `comment_on_pr` / `enqueue_from_pr` / `prepare_merge` / `noop` actions
-- `issue_list` / `issue_selection` system inputs added (#662). Orchestration workflows can now observe repo-wide open Issues, not just the current task's Issue. Resolves the dead Issue branch in `auto-improvement-loop` where PRs absent + open Issues present should route to the Issue planner
 - `persona_providers.<persona>.provider_options` added (#623). Persona-level `provider_options` (e.g. `claude.effort`, `codex.reasoning_effort`) can now be configured alongside `provider` / `model`, removing the need to repeat the same options across every step. Resolution priority: step > workflow > persona > project > global > default
 - Report handles `{current_report}` / `{previous_report}` / `{report_history}` / `{peer_reports}` added to instruction template variables (#627). Facets can now reference self/peer report files abstractly without hardcoding filenames; usable in `reviewer` / `fix` / `supervise` style steps
 - Standardized verification evidence section added to review output contracts (#628). `architecture-review`, `qa-review`, `testing-review`, `security-review`, `requirements-review` now emit a common build / test / behavior-check section with target, content, and result (or explicit "not verified") so supervisors can evaluate evidence consistently
@@ -42,6 +40,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SDK dependencies bumped: `@anthropic-ai/claude-agent-sdk` ^0.2.71 -> ^0.2.119, `@openai/codex-sdk` ^0.114.0 -> ^0.125.0 (bundled `@openai/codex` binary 0.114.0 -> 0.125.0), `@opencode-ai/sdk` >=1.2.10 <1.3.0 -> ^1.14.24 (v2 export retained)
 - E2E test added for the `claude` provider verifying that `provider_options.allowed_tools` propagates to `claude --allowed-tools` so `Bash(python3 -m pytest:*)` runs without approval prompts in real claude provider runs
 - Test policy updated: line count thresholds are no longer treated as test failures in the review workflow
+
+### Experimental
+
+The following features are still being tuned. Behavior, schema, and naming may change in subsequent releases. Use only if you are willing to follow breaking changes.
+
+- `auto-improvement-loop` builtin workflow (#653). An infinite-loop orchestration workflow that scans the repository on a schedule and routes work by priority (PR -> Issue -> fresh improvement -> wait -> route)
+- `max_steps: infinite` (no step cap, no `exceeded` status). Currently used by `auto-improvement-loop`
+- `pr_list` system input (open PRs filtered by `author` / `base_branch` / `head_branch` / `draft`)
+- `issue_list` / `issue_selection` system inputs (#662). Repo-wide open Issue observation from orchestration workflows
+- `task_queue_context.items` (queue contents observable from `when:`)
+- `when:` array references with `exists(list, item.field == "X")` function. Initial scope: `==` and `&&` only
+- `followup-task` builtin structured-output schema with `enqueue_new_task` / `comment_on_pr` / `enqueue_from_pr` / `prepare_merge` / `noop` actions
 
 ## [0.37.0] - 2026-04-20
 

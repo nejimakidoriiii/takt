@@ -10,8 +10,6 @@
 
 ### Added
 
-- `auto-improvement-loop` ビルトイン workflow を追加 (#653)。リポジトリを定期スキャンし、優先度（PR -> Issue -> fresh improvement -> wait -> route）でタスクを振り分ける無限ループのオーケストレーション workflow。同時に基盤機能を追加: `max_steps: infinite`（step 上限なし、`exceeded` にならない）、`pr_list` system input（`author` / `base_branch` / `head_branch` / `draft` で絞り込み可能な open PR 一覧）、`task_queue_context.items`（キュー内容を `when:` から参照可能）、`when:` の配列参照と `exists(list, item.field == "X")` 関数（初期スコープは `==` と `&&` のみ）、`followup-task` ビルトイン構造化出力 schema（`enqueue_new_task` / `comment_on_pr` / `enqueue_from_pr` / `prepare_merge` / `noop` の action）
-- `issue_list` / `issue_selection` system input を追加 (#662)。orchestration workflow から current task の Issue だけでなく、リポジトリ全体の open Issue を観測できるようになった。`auto-improvement-loop` で「PR なし + open Issue あり」の場合に Issue 分岐へ進めるよう dead branch を解消
 - `persona_providers.<persona>.provider_options` をサポート (#623)。persona ごとに `provider` / `model` と並んで `provider_options`（`claude.effort`、`codex.reasoning_effort` 等）を設定可能になり、各 step に同じ provider option を重複記述する必要がなくなった。優先順位: step > workflow > persona > project > global > default
 - インストラクションテンプレート変数に report handle (`{current_report}` / `{previous_report}` / `{report_history}` / `{peer_reports}`) を追加 (#627)。reviewer / fix / supervise 系 step で、自ステップ最新／直前レポートや peer ステップ最新レポート群を、ファセットに具体的なファイル名を直書きせず抽象的に参照できる
 - レビュー系 output contract に検証証跡セクションを標準化 (#628)。`architecture-review`、`qa-review`、`testing-review`、`security-review`、`requirements-review` でビルド / テスト / 動作確認の確認対象・確認内容・結果（または「未確認」の明示）を共通フォーマットで記録するようになり、Supervisor 側で証跡判定が安定する
@@ -42,6 +40,18 @@
 - SDK 依存を更新: `@anthropic-ai/claude-agent-sdk` ^0.2.71 -> ^0.2.119、`@openai/codex-sdk` ^0.114.0 -> ^0.125.0（バンドル `@openai/codex` バイナリも 0.114.0 -> 0.125.0）、`@opencode-ai/sdk` >=1.2.10 <1.3.0 -> ^1.14.24（v2 export は維持）
 - `claude` provider で `provider_options.allowed_tools` が `claude --allowed-tools` に伝搬し、`Bash(python3 -m pytest:*)` が approval なしで通ることを実 claude provider で検証する E2E テストを追加
 - レビュー系 workflow で行数閾値をテスト失敗扱いしないようガイダンスを更新
+
+### Experimental
+
+以下の機能は調整中です。挙動・スキーマ・命名は今後のリリースで変更される可能性があります。破壊的変更を許容できる場合のみ利用してください。
+
+- `auto-improvement-loop` ビルトイン workflow (#653)。リポジトリを定期スキャンし、優先度（PR -> Issue -> fresh improvement -> wait -> route）でタスクを振り分ける無限ループのオーケストレーション workflow
+- `max_steps: infinite`（step 上限なし、`exceeded` にならない）。現状は `auto-improvement-loop` で利用
+- `pr_list` system input（`author` / `base_branch` / `head_branch` / `draft` で絞り込み可能な open PR 一覧）
+- `issue_list` / `issue_selection` system input (#662)。orchestration workflow からリポジトリ全体の open Issue を観測できる
+- `task_queue_context.items`（キュー内容を `when:` から参照可能）
+- `when:` の配列参照と `exists(list, item.field == "X")` 関数。初期スコープは `==` と `&&` のみ
+- `followup-task` ビルトイン構造化出力 schema（`enqueue_new_task` / `comment_on_pr` / `enqueue_from_pr` / `prepare_merge` / `noop` の action）
 
 ## [0.37.0] - 2026-04-20
 
